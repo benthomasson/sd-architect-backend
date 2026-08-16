@@ -1,11 +1,16 @@
 import asyncio
 import json
+import os
 import re
 from pathlib import Path
 
 import websockets
 
 SKILL_REF = (Path(__file__).parent / "skill-reference.md").read_text()
+REASONS_DB = os.environ.get(
+    "REASONS_DB",
+    os.path.expanduser("~/git/drawing-shell-expert/reasons.db"),
+)
 
 SYSTEM_INSTRUCTIONS = """\
 You are editing a software architecture diagram. The user will ask you to modify it.
@@ -15,10 +20,28 @@ architecture JSON in a ```json fenced code block.
 Always output the COMPLETE architecture JSON, not a partial diff."""
 
 
-def build_prompt(message, architecture):
-    arch_json = json.dumps(architecture, indent=2)
-    return f"""{SKILL_REF}
+async def search_beliefs(query):
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "reasons", "--db", REASONS_DB, "search", query,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        if proc.returncode == 0 and stdout:
+            return stdout.decode().strip()
+    except FileNotFoundError:
+        pass
+    return ""
 
+
+def build_prompt(message, architecture, beliefs=""):
+    arch_json = json.dumps(architecture, indent=2)
+    beliefs_section = ""
+    if beliefs:
+        beliefs_section = f"\n## Domain Knowledge\n\n{beliefs}\n"
+    return f"""{SKILL_REF}
+{beliefs_section}
 ## Current Architecture
 
 ```json
@@ -77,7 +100,10 @@ async def handle(ws):
             await ws.send(json.dumps({"type": "error", "content": "Empty message"}))
             continue
 
-        prompt = build_prompt(message, architecture)
+        beliefs = await search_beliefs(message)
+        if beliefs:
+            print(f"  Found beliefs for: {message[:60]}")
+        prompt = build_prompt(message, architecture, beliefs)
 
         try:
             response = await run_claude(prompt)
