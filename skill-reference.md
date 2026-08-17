@@ -74,7 +74,7 @@ Port names are `<component_name>_<port_suffix>`.
 
 ## Available Logos
 
-nginx, FastAPI, PostgreSQL, SQLite, Redis, RabbitMQ, Kafka, LangChain, Langfuse, Snowflake, Firefox, Vertex AI, MCP, Ollama, Terminal, S3, Red Hat, filesystem, Prometheus, Segment, Amplitude, LiteLLM
+nginx, FastAPI, PostgreSQL, SQLite, Redis, RabbitMQ, Kafka, LangChain, Langfuse, Snowflake, Firefox, Vertex AI, MCP, Ollama, Terminal, S3, Red Hat, filesystem, Prometheus, Segment, Amplitude, LiteLLM, Python
 
 Unknown technologies still render — the title shows the name and the subtitle shows the technology text (without an icon).
 
