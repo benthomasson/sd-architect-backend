@@ -45,17 +45,46 @@ Default database: """ + REASONS_DB + """
 - If the user references a specific reasons database, use tools with that `db` path
 - For simple diagram edits (add a component, change a connection), you usually don't need tools
 
-### Final answer
+### Final answer — Delta Edits
 
-When you have enough information, output the complete architecture JSON in a ```json fenced code block.
-Always output the COMPLETE architecture JSON, not a partial diff."""
+When modifying an existing diagram, output a delta edit list in a ```json fenced code block.
+Do NOT regenerate the full architecture JSON. Instead, emit only the changes:
+
+```json
+{"edits": [
+  {"op": "add_component", "component": {"name": "cache", "type": "cache", "position": [800, 300], "technology": "Redis"}},
+  {"op": "add_connection", "connection": {"from": "api_out", "to": "cache_cache_in", "label": "get/set"}}
+]}
+```
+
+#### Available edit operations
+
+| op | Fields | Notes |
+|----|--------|-------|
+| add_component | component: {name, type, position, technology?, ...} | Full component object |
+| remove_component | name | Connections to this component are removed automatically |
+| update_component | name, plus any fields to change (position?, technology?, text?, description?, size?, font_size?, width?, icon_scale?, type?) | Only supplied fields change; omitted fields are preserved |
+| add_connection | connection: {from, to, label?} | Full connection object |
+| remove_connection | from, to | Identified by port pair |
+| update_connection | from, to, label? | Only supplied fields change |
+| rename_component | old_name, new_name | Port references in connections are updated automatically |
+
+#### Rules
+
+- Use delta edits for ALL modifications to existing diagrams
+- Multiple ops in one edit list are applied in order
+- Component names must be unique
+- Port names follow the pattern `<component_name>_<port_suffix>` (see port table above)
+- When adding a component AND connecting it, include both ops in the same edit list
+- Only output a full architecture JSON (with `"components"`) when creating a brand new diagram from scratch (no existing architecture)"""
 
 SYSTEM_INSTRUCTIONS = """\
 You are editing a software architecture diagram. The user will ask you to modify it.
-Respond with a brief explanation of what you changed, then output the complete updated
-architecture JSON in a ```json fenced code block.
+Respond with a brief explanation of what you changed, then output a delta edit list
+in a ```json fenced code block with `{"edits": [...]}`.
 
-Always output the COMPLETE architecture JSON, not a partial diff."""
+Use delta edits for modifications. Only output a full architecture JSON with
+`{"components": [...]}` when creating a brand new diagram from scratch."""
 
 
 async def run_reasons(args):
@@ -110,16 +139,92 @@ def parse_tool_calls(text):
     ]
 
 
-def extract_architecture(text):
+def extract_response(text):
+    """Parse LLM response for either a full architecture or delta edits.
+
+    Returns (architecture_dict, edits_list) — at most one is non-None.
+    """
     blocks = re.findall(r"```json\s*\n(.*?)```", text, re.DOTALL)
     for block in blocks:
         try:
             data = json.loads(block.strip())
-            if isinstance(data, dict) and "components" in data:
-                return data
+            if not isinstance(data, dict):
+                continue
+            if "edits" in data:
+                return None, data["edits"]
+            if "components" in data:
+                return data, None
         except json.JSONDecodeError:
             continue
-    return None
+    return None, None
+
+
+def apply_edits(arch, edits):
+    """Apply a list of delta edit ops to an architecture dict. Returns the modified arch."""
+    arch = json.loads(json.dumps(arch))  # deep copy
+    components = arch.get("components", [])
+    connections = arch.get("connections", [])
+
+    for edit in edits:
+        op = edit.get("op")
+
+        if op == "add_component":
+            components.append(edit["component"])
+
+        elif op == "remove_component":
+            name = edit["name"]
+            components = [c for c in components if c.get("name") != name]
+            prefix = f"{name}_"
+            connections = [c for c in connections
+                           if not c["from"].startswith(prefix) and not c["to"].startswith(prefix)]
+
+        elif op == "update_component":
+            name = edit["name"]
+            for comp in components:
+                if comp.get("name") == name:
+                    for key, val in edit.items():
+                        if key not in ("op", "name"):
+                            comp[key] = val
+                    break
+
+        elif op == "add_connection":
+            connections.append(edit["connection"])
+
+        elif op == "remove_connection":
+            fr, to = edit["from"], edit["to"]
+            connections = [c for c in connections if not (c["from"] == fr and c["to"] == to)]
+
+        elif op == "update_connection":
+            fr, to = edit["from"], edit["to"]
+            for conn in connections:
+                if conn["from"] == fr and conn["to"] == to:
+                    for key, val in edit.items():
+                        if key not in ("op", "from", "to"):
+                            conn[key] = val
+                    break
+
+        elif op == "rename_component":
+            old_name, new_name = edit["old_name"], edit["new_name"]
+            for comp in components:
+                if comp.get("name") == old_name:
+                    comp["name"] = new_name
+                    break
+            old_prefix = f"{old_name}_"
+            new_prefix = f"{new_name}_"
+            for conn in connections:
+                if conn["from"].startswith(old_prefix):
+                    conn["from"] = new_prefix + conn["from"][len(old_prefix):]
+                if conn["to"].startswith(old_prefix):
+                    conn["to"] = new_prefix + conn["to"][len(old_prefix):]
+
+    arch["components"] = components
+    arch["connections"] = connections
+    return arch
+
+
+# Per-connection undo history: list of architecture snapshots.
+# Key = websocket id, value = {"undo": [arch, ...], "redo": [arch, ...], "current": arch}
+undo_stacks = {}
 
 
 def build_prompt(architecture, conversation):
@@ -157,7 +262,26 @@ async def run_claude(prompt):
     return stdout.decode()
 
 
+def push_undo(ws_id, arch):
+    """Save architecture state to undo stack before applying changes."""
+    if ws_id not in undo_stacks:
+        undo_stacks[ws_id] = {"undo": [], "redo": []}
+    stack = undo_stacks[ws_id]
+    stack["undo"].append(json.loads(json.dumps(arch)))
+    stack["redo"].clear()
+    if len(stack["undo"]) > 50:
+        stack["undo"] = stack["undo"][-50:]
+
+
 async def handle(ws):
+    ws_id = id(ws)
+    try:
+        await _handle(ws, ws_id)
+    finally:
+        undo_stacks.pop(ws_id, None)
+
+
+async def _handle(ws, ws_id):
     async for raw in ws:
         try:
             msg = json.loads(raw)
@@ -165,7 +289,27 @@ async def handle(ws):
             await ws.send(json.dumps({"type": "error", "content": "Invalid JSON"}))
             continue
 
-        if msg.get("type") != "chat":
+        msg_type = msg.get("type")
+
+        if msg_type == "undo":
+            architecture = msg.get("architecture", {})
+            stack = undo_stacks.get(ws_id, {"undo": [], "redo": []})
+            if stack["undo"]:
+                stack["redo"].append(json.loads(json.dumps(architecture)))
+                prev = stack["undo"].pop()
+                await ws.send(json.dumps({"type": "architecture", "data": prev}))
+            continue
+
+        if msg_type == "redo":
+            architecture = msg.get("architecture", {})
+            stack = undo_stacks.get(ws_id, {"undo": [], "redo": []})
+            if stack["redo"]:
+                stack["undo"].append(json.loads(json.dumps(architecture)))
+                next_arch = stack["redo"].pop()
+                await ws.send(json.dumps({"type": "architecture", "data": next_arch}))
+            continue
+
+        if msg_type != "chat":
             continue
 
         message = msg.get("message", "")
@@ -187,14 +331,21 @@ async def handle(ws):
                 break
 
             tool_calls = parse_tool_calls(response)
-            arch = extract_architecture(response)
+            arch, edits = extract_response(response)
 
-            # Send text to frontend (strip tool_call blocks for readability)
+            # Send text to frontend (strip tool_call and json blocks for readability)
             display = re.sub(r"```tool_call\s*\n.*?```", "", response, flags=re.DOTALL).strip()
             if display:
                 await ws.send(json.dumps({"type": "text", "content": display}))
 
-            # If architecture JSON found, send it to update the diagram
+            # Handle delta edits — apply to current architecture
+            if edits is not None:
+                push_undo(ws_id, architecture)
+                arch = apply_edits(architecture, edits)
+                architecture = arch
+                print(f"  Applied {len(edits)} delta edit(s)")
+
+            # If architecture JSON found (full regen or applied deltas), send it
             if arch:
                 await ws.send(json.dumps({"type": "architecture", "data": arch}))
 
