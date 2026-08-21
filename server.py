@@ -6,7 +6,8 @@ from pathlib import Path
 
 import websockets
 
-SKILL_REF = (Path(__file__).parent / "skill-reference.md").read_text()
+SKILL_REF_ARCH = (Path(__file__).parent / "skill-reference.md").read_text()
+SKILL_REF_WORKFLOW = (Path(__file__).parent / "skill-reference-workflow.md").read_text()
 REASONS_DB = os.environ.get(
     "REASONS_DB",
     os.path.expanduser("~/git/drawing-shell-expert/reasons.db"),
@@ -78,13 +79,24 @@ Do NOT regenerate the full architecture JSON. Instead, emit only the changes:
 - When adding a component AND connecting it, include both ops in the same edit list
 - Only output a full architecture JSON (with `"components"`) when creating a brand new diagram from scratch (no existing architecture)"""
 
-SYSTEM_INSTRUCTIONS = """\
+SYSTEM_INSTRUCTIONS_ARCH = """\
 You are editing a software architecture diagram. The user will ask you to modify it.
 Respond with a brief explanation of what you changed, then output a delta edit list
 in a ```json fenced code block with `{"edits": [...]}`.
 
 Use delta edits for modifications. Only output a full architecture JSON with
 `{"components": [...]}` when creating a brand new diagram from scratch."""
+
+SYSTEM_INSTRUCTIONS_WORKFLOW = """\
+You are editing a workflow diagram. The user will ask you to modify it.
+Workflow diagrams use step types (start, step, decision, fork, join, end) connected
+by directed flow — connections mean "happens after", not "talks to".
+Respond with a brief explanation of what you changed, then output a delta edit list
+in a ```json fenced code block with `{"edits": [...]}`.
+
+Use delta edits for modifications. Only output a full workflow JSON with
+`{"components": [...]}` when creating a brand new diagram from scratch.
+Always include `"mode": "workflow"` in the view object."""
 
 
 async def run_reasons(args):
@@ -228,13 +240,18 @@ undo_stacks = {}
 
 
 def build_prompt(architecture, conversation):
+    mode = architecture.get("view", {}).get("mode", "architecture")
+    is_workflow = mode == "workflow"
+    skill_ref = SKILL_REF_WORKFLOW if is_workflow else SKILL_REF_ARCH
+    instructions = SYSTEM_INSTRUCTIONS_WORKFLOW if is_workflow else SYSTEM_INSTRUCTIONS_ARCH
+    section_label = "Current Workflow" if is_workflow else "Current Architecture"
     arch_json = json.dumps(architecture, indent=2)
     conv_text = "\n\n".join(conversation)
-    return f"""{SKILL_REF}
+    return f"""{skill_ref}
 
 {TOOL_INSTRUCTIONS}
 
-## Current Architecture
+## {section_label}
 
 ```json
 {arch_json}
@@ -242,7 +259,7 @@ def build_prompt(architecture, conversation):
 
 ## Instructions
 
-{SYSTEM_INSTRUCTIONS}
+{instructions}
 
 ## Conversation
 
