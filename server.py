@@ -239,7 +239,7 @@ def apply_edits(arch, edits):
 undo_stacks = {}
 
 
-def build_prompt(architecture, conversation):
+def build_prompt(architecture, conversation, companion=None):
     mode = architecture.get("view", {}).get("mode", "architecture")
     is_workflow = mode == "workflow"
     skill_ref = SKILL_REF_WORKFLOW if is_workflow else SKILL_REF_ARCH
@@ -247,6 +247,20 @@ def build_prompt(architecture, conversation):
     section_label = "Current Workflow" if is_workflow else "Current Architecture"
     arch_json = json.dumps(architecture, indent=2)
     conv_text = "\n\n".join(conversation)
+
+    companion_section = ""
+    if companion:
+        companion_label = "Architecture Diagram" if is_workflow else "Workflow Diagram"
+        companion_json = json.dumps(companion, indent=2)
+        companion_section = f"""
+
+## Companion {companion_label} (read-only reference)
+
+```json
+{companion_json}
+```
+"""
+
     return f"""{skill_ref}
 
 {TOOL_INSTRUCTIONS}
@@ -256,7 +270,7 @@ def build_prompt(architecture, conversation):
 ```json
 {arch_json}
 ```
-
+{companion_section}
 ## Instructions
 
 {instructions}
@@ -332,6 +346,12 @@ async def _handle(ws, ws_id):
         message = msg.get("message", "")
         architecture = msg.get("architecture", {})
 
+        # Companion diagram: the other mode's diagram for cross-reference
+        arch_diagram = msg.get("architecture_diagram")
+        workflow_diagram = msg.get("workflow_diagram")
+        mode = architecture.get("view", {}).get("mode", "architecture")
+        companion = workflow_diagram if mode != "workflow" else arch_diagram
+
         if not message.strip():
             await ws.send(json.dumps({"type": "error", "content": "Empty message"}))
             continue
@@ -339,7 +359,7 @@ async def _handle(ws, ws_id):
         conversation = [f"**User:** {message}"]
 
         for iteration in range(MAX_TOOL_ITERATIONS):
-            prompt = build_prompt(architecture, conversation)
+            prompt = build_prompt(architecture, conversation, companion=companion)
 
             try:
                 response = await run_claude(prompt)
