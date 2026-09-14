@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import json
 import os
@@ -422,9 +423,27 @@ async def _handle(ws, ws_id):
 
 
 async def main():
-    print("sd-architect-backend listening on ws://localhost:8765")
-    print(f"  Default beliefs DB: {REASONS_DB}")
-    async with websockets.serve(handle, "localhost", 8765):
+    parser = argparse.ArgumentParser(description="sd-architect-backend WebSocket server")
+    parser.add_argument(
+        "--db",
+        default=None,
+        help="Path to reasons.db belief database (overrides REASONS_DB env var)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8765,
+        help="WebSocket port (default: 8765)",
+    )
+    args = parser.parse_args()
+
+    global REASONS_DB
+    if args.db:
+        REASONS_DB = os.path.expanduser(args.db)
+
+    print(f"sd-architect-backend listening on ws://localhost:{args.port}")
+    print(f"  Beliefs DB: {REASONS_DB}")
+    async with websockets.serve(handle, "localhost", args.port):
         await asyncio.Future()
 
 
