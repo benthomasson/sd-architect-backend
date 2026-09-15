@@ -1,7 +1,9 @@
 import argparse
 import asyncio
 import json
+import math
 import os
+import random
 import re
 from pathlib import Path
 
@@ -371,6 +373,9 @@ async def handle(ws):
         await _handle(ws, ws_id)
     finally:
         undo_stacks.pop(ws_id, None)
+        task = status_tasks.pop(ws_id, None)
+        if task:
+            task.cancel()
 
 
 async def _handle(ws, ws_id):
@@ -399,6 +404,26 @@ async def _handle(ws, ws_id):
                 stack["undo"].append(json.loads(json.dumps(architecture)))
                 next_arch = stack["redo"].pop()
                 await ws.send(json.dumps({"type": "architecture", "data": next_arch}))
+            continue
+
+        if msg_type == "subscribe_status":
+            arch = msg.get("architecture", {})
+            names = [c["name"] for c in arch.get("components", []) if "name" in c]
+            if names:
+                # Cancel any existing status task for this connection
+                if ws_id in status_tasks:
+                    status_tasks[ws_id].cancel()
+                status_tasks[ws_id] = asyncio.create_task(
+                    send_simulated_status(ws, names)
+                )
+                print(f"  Status simulation started for {len(names)} components")
+            continue
+
+        if msg_type == "unsubscribe_status":
+            if ws_id in status_tasks:
+                status_tasks[ws_id].cancel()
+                del status_tasks[ws_id]
+                print("  Status simulation stopped")
             continue
 
         if msg_type != "chat":
@@ -480,6 +505,50 @@ async def _handle(ws, ws_id):
             }))
 
         await ws.send(json.dumps({"type": "done"}))
+
+
+# ---- Simulated status data ----
+
+status_tasks: dict[int, asyncio.Task] = {}
+
+
+async def send_simulated_status(ws, components: list[str]):
+    """Push fake CPU/memory/state data every 2 seconds for testing overlays."""
+    # Each component gets a base load profile that drifts over time
+    profiles = {}
+    for name in components:
+        profiles[name] = {
+            "cpu_base": random.uniform(15, 60),
+            "mem_base": random.uniform(30, 70),
+            "up": True,
+            "flip_chance": 0.02,  # 2% chance of toggling state per tick
+        }
+
+    tick = 0
+    try:
+        while True:
+            data = {}
+            for name, p in profiles.items():
+                # Sinusoidal drift + noise
+                cpu = p["cpu_base"] + 15 * math.sin(tick * 0.1 + hash(name) % 7) + random.gauss(0, 3)
+                mem = p["mem_base"] + 8 * math.sin(tick * 0.07 + hash(name) % 5) + random.gauss(0, 2)
+                cpu = max(0, min(100, cpu))
+                mem = max(0, min(100, mem))
+
+                if random.random() < p["flip_chance"]:
+                    p["up"] = not p["up"]
+
+                data[name] = {
+                    "cpu": round(cpu, 1),
+                    "memory": round(mem, 1),
+                    "state": "up" if p["up"] else "down",
+                }
+
+            await ws.send(json.dumps({"type": "status", "data": data}))
+            tick += 1
+            await asyncio.sleep(2)
+    except (websockets.ConnectionClosed, asyncio.CancelledError):
+        pass
 
 
 async def main():
