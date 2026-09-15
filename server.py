@@ -9,6 +9,9 @@ import websockets
 
 SKILL_REF_ARCH = (Path(__file__).parent / "skill-reference.md").read_text()
 SKILL_REF_WORKFLOW = (Path(__file__).parent / "skill-reference-workflow.md").read_text()
+SKILL_REF_NETWORK = (Path(__file__).parent / "skill-reference-network.md").read_text()
+SKILL_REF_CLOUD = (Path(__file__).parent / "skill-reference-cloud.md").read_text()
+SKILL_REF_CICD = (Path(__file__).parent / "skill-reference-cicd.md").read_text()
 REASONS_DB = os.environ.get(
     "REASONS_DB",
     os.path.expanduser("~/git/drawing-shell-expert/reasons.db"),
@@ -98,6 +101,39 @@ in a ```json fenced code block with `{"edits": [...]}`.
 Use delta edits for modifications. Only output a full workflow JSON with
 `{"components": [...]}` when creating a brand new diagram from scratch.
 Always include `"mode": "workflow"` in the view object."""
+
+SYSTEM_INSTRUCTIONS_NETWORK = """\
+You are editing a network diagram. The user will ask you to modify it.
+Network diagrams show physical and logical network topology — servers, switches,
+routers, firewalls, and their connections.
+Respond with a brief explanation of what you changed, then output a delta edit list
+in a ```json fenced code block with `{"edits": [...]}`.
+
+Use delta edits for modifications. Only output a full network JSON with
+`{"components": [...]}` when creating a brand new diagram from scratch.
+Always include `"mode": "network"` in the view object."""
+
+SYSTEM_INSTRUCTIONS_CLOUD = """\
+You are editing a cloud infrastructure diagram. The user will ask you to modify it.
+Cloud diagrams show cloud services — VPCs, VMs, containers, serverless functions,
+storage, databases, load balancers, CDNs, and security components.
+Respond with a brief explanation of what you changed, then output a delta edit list
+in a ```json fenced code block with `{"edits": [...]}`.
+
+Use delta edits for modifications. Only output a full cloud JSON with
+`{"components": [...]}` when creating a brand new diagram from scratch.
+Always include `"mode": "cloud"` in the view object."""
+
+SYSTEM_INSTRUCTIONS_CICD = """\
+You are editing a CI/CD pipeline diagram. The user will ask you to modify it.
+CI/CD diagrams show pipeline stages — code repos, build steps, test steps,
+staging and production environments connected by artifact and trigger flow.
+Respond with a brief explanation of what you changed, then output a delta edit list
+in a ```json fenced code block with `{"edits": [...]}`.
+
+Use delta edits for modifications. Only output a full CI/CD JSON with
+`{"components": [...]}` when creating a brand new diagram from scratch.
+Always include `"mode": "cicd"` in the view object."""
 
 
 async def run_reasons(args):
@@ -240,12 +276,36 @@ def apply_edits(arch, edits):
 undo_stacks = {}
 
 
+SKILL_REFS = {
+    "architecture": SKILL_REF_ARCH,
+    "workflow": SKILL_REF_WORKFLOW,
+    "network": SKILL_REF_NETWORK,
+    "cloud": SKILL_REF_CLOUD,
+    "cicd": SKILL_REF_CICD,
+}
+
+SYSTEM_INSTRUCTIONS = {
+    "architecture": SYSTEM_INSTRUCTIONS_ARCH,
+    "workflow": SYSTEM_INSTRUCTIONS_WORKFLOW,
+    "network": SYSTEM_INSTRUCTIONS_NETWORK,
+    "cloud": SYSTEM_INSTRUCTIONS_CLOUD,
+    "cicd": SYSTEM_INSTRUCTIONS_CICD,
+}
+
+MODE_LABELS = {
+    "architecture": "Current Architecture",
+    "workflow": "Current Workflow",
+    "network": "Current Network Diagram",
+    "cloud": "Current Cloud Diagram",
+    "cicd": "Current CI/CD Pipeline",
+}
+
+
 def build_prompt(architecture, conversation, companion=None):
     mode = architecture.get("view", {}).get("mode", "architecture")
-    is_workflow = mode == "workflow"
-    skill_ref = SKILL_REF_WORKFLOW if is_workflow else SKILL_REF_ARCH
-    instructions = SYSTEM_INSTRUCTIONS_WORKFLOW if is_workflow else SYSTEM_INSTRUCTIONS_ARCH
-    section_label = "Current Workflow" if is_workflow else "Current Architecture"
+    skill_ref = SKILL_REFS.get(mode, SKILL_REF_ARCH)
+    instructions = SYSTEM_INSTRUCTIONS.get(mode, SYSTEM_INSTRUCTIONS_ARCH)
+    section_label = MODE_LABELS.get(mode, "Current Architecture")
     arch_json = json.dumps(architecture, indent=2)
     conv_text = "\n\n".join(conversation)
 
